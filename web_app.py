@@ -93,6 +93,49 @@ def method_2(text, src, tgt):
     return "".join(part[0] for part in r.json()[0] if part[0])
 
 
+def microsoft(text, src, tgt):
+    """Official Microsoft Translator (needs AZURE_TRANSLATOR_KEY)."""
+    fix = {"zh-CN": "zh-Hans"}
+    params = {"api-version": "3.0", "to": fix.get(tgt, tgt)}
+    if src != "auto":
+        params["from"] = fix.get(src, src)
+    r = requests.post(
+        "https://api.cognitive.microsofttranslator.com/translate",
+        params=params,
+        headers={
+            "Ocp-Apim-Subscription-Key": os.environ["AZURE_TRANSLATOR_KEY"],
+            "Ocp-Apim-Subscription-Region": os.environ.get("AZURE_TRANSLATOR_REGION", "global"),
+            "Content-Type": "application/json",
+        },
+        json=[{"Text": text}],
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json()[0]["translations"][0]["text"]
+
+
+def google_cloud(text, src, tgt):
+    """Official Google Cloud Translation (needs GOOGLE_API_KEY)."""
+    data = {"q": text, "target": tgt, "format": "text",
+            "key": os.environ["GOOGLE_API_KEY"]}
+    if src != "auto":
+        data["source"] = src
+    r = requests.post("https://translation.googleapis.com/language/translate/v2",
+                      data=data, timeout=10)
+    r.raise_for_status()
+    return r.json()["data"]["translations"][0]["translatedText"]
+
+
+def active_methods():
+    """Official services first (if a key is set), free routes last."""
+    found = []
+    if os.environ.get("AZURE_TRANSLATOR_KEY"):
+        found.append(microsoft)
+    if os.environ.get("GOOGLE_API_KEY"):
+        found.append(google_cloud)
+    return found + [method_1, method_2]
+
+
 @app.post("/translate")
 @login_required
 def translate():
@@ -106,7 +149,7 @@ def translate():
         return jsonify(ok=False, error="Type some text first.")
     if len(text) > 4000:
         return jsonify(ok=False, error="Text is too long. Keep it under 4000 characters.")
-    for method in (method_1, method_2):
+    for method in active_methods():
         try:
             out = method(text, src, tgt)
             if out and out.strip():
