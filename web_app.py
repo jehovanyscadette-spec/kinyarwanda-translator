@@ -2,6 +2,7 @@
 Run locally:  py -3.11 web_app.py      Online:  gunicorn web_app:app"""
 import os
 import re
+from datetime import date
 import secrets
 import sqlite3
 import threading
@@ -35,21 +36,54 @@ app.config.update(
 
 
 # ---------------------------------------------------------------- database
-def db():
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    return con
+# Online: set DATABASE_URL (Postgres, e.g. Neon) so accounts are kept forever.
+# On your computer: no setting needed, it uses the file users.db.
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if DATABASE_URL:
+    import psycopg
+    from psycopg.rows import dict_row
+
+CODE_NAME = {GOOGLE[n]: n.title() for n in NAMES}
+CODE_NAME["auto"] = "Auto-detect"
+
+
+def run(sql, params=(), fetch=None):
+    """Run one SQL command. fetch: None, 'one', 'all' or 'id' (new row id)."""
+    if DATABASE_URL:
+        con = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15)
+        sql = sql.replace("?", "%s") + (" RETURNING id" if fetch == "id" else "")
+    else:
+        con = sqlite3.connect(DB_PATH)
+        con.row_factory = sqlite3.Row
+    try:
+        cur = con.execute(sql, params)
+        if fetch == "one":
+            out = cur.fetchone()
+        elif fetch == "all":
+            out = cur.fetchall()
+        elif fetch == "id":
+            out = cur.fetchone()["id"] if DATABASE_URL else cur.lastrowid
+        else:
+            out = None
+        con.commit()
+        return out
+    finally:
+        con.close()
 
 
 def init_db():
-    con = db()
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS users ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+    pk = "SERIAL PRIMARY KEY" if DATABASE_URL else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    run(f"CREATE TABLE IF NOT EXISTS users (id {pk}, name TEXT NOT NULL, "
         "email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, "
-        "created TEXT DEFAULT CURRENT_TIMESTAMP)")
-    con.commit()
-    con.close()
+        "created TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+    run(f"CREATE TABLE IF NOT EXISTS history (id {pk}, user_id INTEGER NOT NULL, "
+        "source TEXT, target TEXT, original TEXT, result TEXT, "
+        "created TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+
+
+def iso(v):
+    s = v.isoformat() if hasattr(v, "isoformat") else str(v).replace(" ", "T")
+    return s if s.endswith("Z") else s + "Z"
 
 
 init_db()
@@ -153,6 +187,11 @@ def translate():
         try:
             out = method(text, src, tgt)
             if out and out.strip():
+                try:
+                    run("INSERT INTO history (user_id, source, target, original, result) "
+                        "VALUES (?, ?, ?, ?, ?)", (session["user_id"], src, tgt, text, out))
+                except Exception:
+                    pass  # a history problem must never block a translation
                 return jsonify(ok=True, text=out)
         except Exception:
             pass
@@ -206,6 +245,34 @@ textarea{resize:vertical;width:100%}
 button#swap{padding:9px 14px;background:#fff;color:var(--green);border-color:var(--line)}
 .hint{color:var(--muted);font-size:.9rem;margin-top:18px}
 @media(max-width:700px){.panes{grid-template-columns:1fr}textarea,.out{min-height:140px}}
+/* tabs, history, learn */
+[hidden]{display:none!important}
+.logo{font:700 1.2rem Georgia,"Times New Roman",serif;color:var(--deep);text-decoration:none}
+nav{display:flex;gap:4px;flex:1;margin-left:18px}
+nav a{padding:7px 14px;border-radius:8px;color:var(--muted);text-decoration:none;font-weight:600}
+nav a:hover{background:var(--paper)}nav a.on{background:#e4efe8;color:var(--deep)}
+.who{color:var(--muted);margin-right:10px}
+.toolbar{display:flex;gap:10px;margin-bottom:16px}.toolbar form{margin:0}
+.toolbar input{flex:1;font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:8px;min-width:0}
+.hist{list-style:none;margin:0;padding:0;display:grid;gap:12px}
+.hist li{background:#fff;border:1px solid var(--line);border-left:5px solid var(--green);border-radius:10px;padding:14px 16px}
+.pair{display:flex;justify-content:space-between;gap:10px;color:var(--muted);font-size:.85rem}
+.tag{font-weight:600;color:var(--green)}
+.orig{margin:8px 0 2px;color:var(--muted);overflow-wrap:anywhere}
+.res{margin:0 0 12px;font-size:1.2rem;font-weight:600;overflow-wrap:anywhere}
+.row{display:flex;gap:10px;align-items:center}.row form{margin:0}
+.small{padding:6px 12px;font-size:.9rem}
+a.btn{text-decoration:none;display:inline-block}a.btn.ghost{background:transparent;color:var(--green)}
+.empty{text-align:center;padding:56px 20px;background:#fff;border:1px dashed var(--line);border-radius:12px}
+.empty h2{font-size:1.5rem;margin-bottom:6px}.empty p{color:var(--muted);margin:0 0 18px}
+.today{background:var(--deep);color:#fff;border-radius:14px;padding:28px;margin-bottom:24px}
+.today .label{color:var(--yellow);font-weight:700;letter-spacing:.06em;text-transform:uppercase;font-size:.8rem}
+.today .kin{font:700 clamp(2rem,6vw,3.2rem)/1.1 Georgia,serif;margin:8px 0}.today .en{color:#cfe3d7}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+.cards div{background:#fff;border:1px solid var(--line);border-top:4px solid var(--blue);border-radius:10px;padding:14px 16px}
+.cards div:nth-child(3n+2){border-top-color:var(--yellow)}.cards div:nth-child(3n){border-top-color:var(--green)}
+.cards b{display:block;font:700 1.25rem Georgia,serif}.cards span{color:var(--muted)}
+@media(max-width:700px){nav{margin-left:6px}.who{display:none}header{flex-wrap:wrap}}
 """
 
 AUTH = """<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -252,18 +319,23 @@ document.getElementById("show").onchange = e => {
 };
 </script></body></html>"""
 
-APP = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+LAYOUT = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Kinyarwanda Translator</title><style>{{ css|safe }}</style></head><body>
+<title>Ikinyarwanda Translator</title><style>{{ css|safe }}</style></head><body>
 <div class="flag"><i></i><i></i><i></i></div>
 <header>
-  <strong>Muraho, {{ name }}</strong>
+  <a class="logo" href="{{ url_for('home') }}">Ikinyarwanda</a>
+  <nav>{% for key, label, url in tabs %}<a href="{{ url }}" class="{{ 'on' if active == key else '' }}">{{ label }}</a>{% endfor %}</nav>
+  <span class="who">Muraho, {{ name }}</span>
   <form method="post" action="{{ url_for('logout') }}">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button class="ghost" type="submit">Log out</button>
   </form>
 </header>
-<main>
+<main>__BODY__</main>
+<script>const $ = id => document.getElementById(id);__SCRIPT__</script></body></html>"""
+
+APP_BODY = """
 <h1>Translate into Kinyarwanda</h1>
 <p class="sub2">Type a word or sentence in any language. You can also choose a different language to translate into.</p>
 <div class="langs">
@@ -280,10 +352,13 @@ APP = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <button id="copy" class="ghost">Copy translation</button>
 <button id="clear" class="ghost">Clear</button>
 </div>
-<p class="hint">Needs an internet connection. Machine translation can make small mistakes, so check important text. Press Ctrl+Enter to translate.</p>
-</main>
-<script>
-const $ = id => document.getElementById(id);
+<p class="hint">Needs an internet connection. Machine translation can make small mistakes, so check important text. Press Ctrl+Enter to translate.</p>"""
+
+APP_JS = """
+const pre = {{ pre|tojson }};
+if(pre.text) $("text").value = pre.text;
+if(pre.src) $("src").value = pre.src;
+if(pre.tgt) $("tgt").value = pre.tgt;
 async function go(){
   const text = $("text").value.trim();
   if(!text){ show("Type some text first.", "error"); return; }
@@ -303,7 +378,77 @@ $("text").addEventListener("keydown", e => { if(e.ctrlKey && e.key==="Enter") go
 $("clear").onclick = () => { $("text").value=""; show("The translation appears here.", "empty"); };
 $("copy").onclick = async () => { const o=$("out"); if(!o.classList.contains("empty") && !o.classList.contains("error")){ await navigator.clipboard.writeText(o.textContent); $("copy").textContent="Copied"; setTimeout(()=>$("copy").textContent="Copy translation",1500);} };
 $("swap").onclick = () => { if($("src").value!=="auto"){ const s=$("src").value; $("src").value=$("tgt").value; $("tgt").value=s; } };
-</script></body></html>"""
+"""
+
+HISTORY_BODY = """
+<h1>History</h1>
+<p class="sub2">Everything you translated, newest first. Only you can see it.</p>
+{% if items %}
+<div class="toolbar">
+  <input type="search" id="find" placeholder="Search your history" aria-label="Search history">
+  <form method="post" action="{{ url_for('history_clear') }}" onsubmit="return confirm('Delete all your history?')">
+    <input type="hidden" name="csrf" value="{{ csrf }}"><button class="ghost" type="submit">Clear all</button>
+  </form>
+</div>
+<ul class="hist" id="hist">
+{% for h in items %}
+<li data-s="{{ (h.original ~ ' ' ~ h.result)|lower }}">
+  <div class="pair"><span class="tag">{{ h.src }} &rarr; {{ h.tgt }}</span><time datetime="{{ h.when }}"></time></div>
+  <p class="orig">{{ h.original }}</p>
+  <p class="res">{{ h.result }}</p>
+  <div class="row">
+    <a class="btn ghost small" href="{{ url_for('home', text=h.original, src=h.source, tgt=h.target) }}">Translate again</a>
+    <form method="post" action="{{ url_for('history_delete', hid=h.id) }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}"><button class="ghost small" type="submit">Delete</button>
+    </form>
+  </div>
+</li>
+{% endfor %}
+</ul>
+<p id="none" class="sub2" hidden>No match.</p>
+{% else %}
+<div class="empty"><h2>Nothing here yet</h2><p>Your translations will appear here.</p>
+<a class="btn" href="{{ url_for('home') }}">Start translating</a></div>
+{% endif %}"""
+
+HISTORY_JS = """
+document.querySelectorAll("time").forEach(t => t.textContent = new Date(t.dateTime).toLocaleString([], {dateStyle:"medium", timeStyle:"short"}));
+const f = $("find");
+if(f) f.oninput = () => { const q = f.value.toLowerCase(); let n = 0;
+  document.querySelectorAll("#hist li").forEach(li => { const ok = li.dataset.s.includes(q); li.hidden = !ok; if(ok) n++; });
+  $("none").hidden = n > 0; };
+"""
+
+LEARN_BODY = """
+<h1>Learn Kinyarwanda</h1>
+<p class="sub2">Everyday phrases to practise. A new one is featured each day.</p>
+<section class="today"><div class="label">Phrase of the day</div>
+<div class="kin">{{ today[1] }}</div><div class="en">{{ today[0] }}</div></section>
+<div class="cards">{% for en, kin in phrases %}<div><b>{{ kin }}</b><span>{{ en }}</span></div>{% endfor %}</div>
+<p class="hint">These phrases are written for learners. Check with a native speaker before using them in formal writing.</p>"""
+
+PHRASES = [
+    ("Hello", "Muraho"), ("Good morning", "Mwaramutse"),
+    ("Good afternoon / evening", "Mwiriwe"), ("How are you?", "Amakuru?"),
+    ("I am fine", "Meze neza"), ("Thank you", "Murakoze"),
+    ("You are welcome", "Ntacyo"), ("Welcome", "Murakaza neza"),
+    ("Yes", "Yego"), ("No", "Oya"), ("Please", "Nyabuneka"),
+    ("Excuse me / Sorry", "Mbabarira"), ("Goodbye", "Murabeho"),
+    ("See you later", "Turabonana"), ("Good night", "Ijoro ryiza"),
+    ("My name is ...", "Nitwa ..."), ("I love you", "Ndagukunda"),
+    ("Water", "Amazi"), ("Happy birthday", "Isabukuru nziza"),
+    ("How much is it?", "Ni angahe?"),
+]
+
+
+def page(body, script="", active="", **ctx):
+    tpl = LAYOUT.replace("__BODY__", body).replace("__SCRIPT__", script)
+    tabs = [("translate", "Translate", url_for("home")),
+            ("history", "History", url_for("history")),
+            ("learn", "Learn", url_for("learn"))]
+    return render_template_string(
+        tpl, css=CSS, csrf=csrf_token(), name=session.get("name", ""),
+        active=active, tabs=tabs, **ctx)
 
 
 def options(selected=None):
@@ -325,9 +470,45 @@ def auth_page(mode, error="", form=None):
 @app.get("/")
 @login_required
 def home():
-    return render_template_string(
-        APP, css=CSS, csrf=csrf_token(), name=session.get("name", ""),
-        opts=options(), opts_t=options("rw"))
+    pre = {"text": request.args.get("text", "")[:4000],
+           "src": request.args.get("src", ""), "tgt": request.args.get("tgt", "")}
+    return page(APP_BODY, APP_JS, "translate", opts=options(), opts_t=options("rw"), pre=pre)
+
+
+@app.get("/history")
+@login_required
+def history():
+    rows = run("SELECT * FROM history WHERE user_id = ? ORDER BY id DESC LIMIT 200",
+               (session["user_id"],), "all")
+    items = [{"id": r["id"], "source": r["source"], "target": r["target"],
+              "src": CODE_NAME.get(r["source"], r["source"]),
+              "tgt": CODE_NAME.get(r["target"], r["target"]),
+              "original": r["original"], "result": r["result"],
+              "when": iso(r["created"])} for r in rows]
+    return page(HISTORY_BODY, HISTORY_JS, "history", items=items)
+
+
+@app.post("/history/<int:hid>/delete")
+@login_required
+def history_delete(hid):
+    if csrf_ok():
+        run("DELETE FROM history WHERE id = ? AND user_id = ?", (hid, session["user_id"]))
+    return redirect(url_for("history"))
+
+
+@app.post("/history/clear")
+@login_required
+def history_clear():
+    if csrf_ok():
+        run("DELETE FROM history WHERE user_id = ?", (session["user_id"],))
+    return redirect(url_for("history"))
+
+
+@app.get("/learn")
+@login_required
+def learn():
+    today = PHRASES[date.today().toordinal() % len(PHRASES)]
+    return page(LEARN_BODY, "", "learn", phrases=PHRASES, today=today)
 
 
 @app.route("/signup", methods=["GET", "POST"])
@@ -353,18 +534,13 @@ def signup():
     if pw != request.form.get("confirm", ""):
         return auth_page("signup", "The two passwords do not match.", form)
 
-    con = db()
     try:
-        cur = con.execute(
-            "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
-            (name, email, generate_password_hash(pw)))
-        con.commit()
-        uid = cur.lastrowid
-    except sqlite3.IntegrityError:
-        return auth_page("signup", "An account with this email already exists. Log in instead.", form)
-    finally:
-        con.close()
-
+        uid = run("INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
+                  (name, email, generate_password_hash(pw)), "id")
+    except Exception as e:
+        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+            return auth_page("signup", "An account with this email already exists. Log in instead.", form)
+        raise
     session.clear()
     session["user_id"], session["name"] = uid, name
     return redirect(url_for("home"))
@@ -381,9 +557,7 @@ def login():
         return auth_page("login", "Your session expired. Please try again.")
     email = request.form.get("email", "").strip().lower()
     pw = request.form.get("password", "")
-    con = db()
-    row = con.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-    con.close()
+    row = run("SELECT * FROM users WHERE email = ?", (email,), "one")
     if not row or not check_password_hash(row["password_hash"], pw):
         return auth_page("login", "The email or password is wrong.", {"name": "", "email": email})
 

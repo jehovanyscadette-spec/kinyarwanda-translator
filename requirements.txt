@@ -1,4 +1,5 @@
-   flask
-   deep-translator
-   requests
-   gunicorn
+flask
+deep-translator
+requests
+gunicorn
+psycopg[binary]
